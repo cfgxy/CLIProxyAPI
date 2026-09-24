@@ -57,6 +57,34 @@ pprof:
   enable: false
   addr: "127.0.0.1:8316"
 
+# Optional OpenTelemetry tracing export (e.g. to a self-hosted Langfuse
+# instance via OTLP/HTTP). Disabled by default: when enabled is false, no
+# span, exporter, or background goroutine is ever created.
+#
+# Exporter credentials are NEVER read from this file. Set them via the
+# environment variables named by exporter.public-key-env / secret-key-env
+# (default LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY); tracing stays disabled
+# if the named environment variables are not set when enabled is true.
+# observability:
+#   enabled: false
+#   service-name: "cli-proxy-api"       # Reported as the OTEL resource service.name
+#   exporter:
+#     # Full OTLP/HTTP traces endpoint. otlptracehttp uses this URL as-is, it
+#     # does NOT append "/v1/traces" automatically, so it must be included here.
+#     endpoint: "https://<your-langfuse-host>/api/public/otel/v1/traces"
+#     public-key-env: "LANGFUSE_PUBLIC_KEY"   # Env var holding the Langfuse Public Key
+#     secret-key-env: "LANGFUSE_SECRET_KEY"   # Env var holding the Langfuse Secret Key
+#     insecure: false                  # Set true only for a plaintext HTTP dev endpoint
+#     timeout-seconds: 5               # Bounds a single OTLP export HTTP call
+#     max-queue-size: 2048             # Bounded in-memory span queue; full queue drops spans (Fail-Open)
+#     max-export-batch-size: 512
+#     batch-timeout-seconds: 5
+#     shutdown-timeout-seconds: 5      # Bounds the graceful-shutdown flush
+#   capture:
+#     input: false                     # Capture request payloads onto spans (redacted). Default off.
+#     output: false                    # Capture response payloads onto spans (redacted). Default off.
+#     max-bytes: 4096                  # Truncates captured payloads
+
 # Enable local network mDNS / DNS-SD service discovery (RFC 6762 / RFC 6763).
 # When enabled, broadcasts _ai-gateway._tcp with API protocol subtypes on the local network.
 # NOTE for Docker users: Link-local multicast (224.0.0.251) cannot cross default NAT bridge networks.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/observability"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v7/sdk/access"
@@ -121,6 +122,8 @@ func (s *Service) Run(ctx context.Context) error {
 		// Home mode does not expose in-process Redis RESP usage output; usage is forwarded to home instead.
 		redisqueue.SetEnabled(true)
 	}
+
+	observability.Init(ctx, s.cfg.Observability)
 
 	// handlers no longer depend on legacy clients; pass nil slice initially
 	s.server = api.NewServer(s.cfg, s.coreManager, s.accessManager, s.configPath, s.serverOptions...)
@@ -354,6 +357,10 @@ func (s *Service) Shutdown(ctx context.Context) error {
 		}
 
 		usage.StopDefault()
+
+		if errFlush := observability.Shutdown(ctx); errFlush != nil {
+			log.Warnf("observability: shutdown flush did not complete cleanly: %v", errFlush)
+		}
 	})
 	return shutdownErr
 }
