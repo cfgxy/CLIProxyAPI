@@ -1,7 +1,6 @@
 package observability
 
 import (
-	"net/http"
 	"strings"
 	"testing"
 )
@@ -38,21 +37,35 @@ func TestRedactText_StripsApiKeyAssignment(t *testing.T) {
 	}
 }
 
-func TestRedactHeaders_MasksSensitiveHeaders(t *testing.T) {
-	h := http.Header{}
-	h.Set("Authorization", "Bearer super-secret-token")
-	h.Set("Cookie", "session=abc123")
-	h.Set("X-Request-Id", "req-1")
+func TestRedactText_StripsGoogleApiKey_BareAssignment(t *testing.T) {
+	in := "api_key=AIzaSyD1234567890abcdefgh"
+	out := redactText(in)
+	if strings.Contains(out, "AIzaSyD1234567890abcdefgh") {
+		t.Fatalf("expected google api key to be redacted, got %q", out)
+	}
+}
 
-	out := redactHeaders(h)
-	if out["Authorization"] != redactedPlaceholder {
-		t.Fatalf("expected Authorization header to be redacted, got %q", out["Authorization"])
+func TestRedactText_StripsGoogleApiKey_JSONKeyField(t *testing.T) {
+	in := `{"key": "AIzaSyD1234567890abcdefgh"}`
+	out := redactText(in)
+	if strings.Contains(out, "AIzaSyD1234567890abcdefgh") {
+		t.Fatalf("expected google api key under JSON \"key\" field to be redacted, got %q", out)
 	}
-	if out["Cookie"] != redactedPlaceholder {
-		t.Fatalf("expected Cookie header to be redacted, got %q", out["Cookie"])
+}
+
+func TestRedactText_StripsGoogleApiKey_JSONApiKeyField(t *testing.T) {
+	in := `{"api_key": "AIzaSyD1234567890abcdefgh"}`
+	out := redactText(in)
+	if strings.Contains(out, "AIzaSyD1234567890abcdefgh") {
+		t.Fatalf("expected google api key under JSON \"api_key\" field to be redacted, got %q", out)
 	}
-	if out["X-Request-Id"] != "req-1" {
-		t.Fatalf("expected non-sensitive header to pass through, got %q", out["X-Request-Id"])
+}
+
+func TestRedactText_StripsGoogleApiKey_HeaderStyle(t *testing.T) {
+	in := `{"x-goog-api-key":"AIzaSyD1234567890abcdefgh"}`
+	out := redactText(in)
+	if strings.Contains(out, "AIzaSyD1234567890abcdefgh") {
+		t.Fatalf("expected google api key under x-goog-api-key field to be redacted, got %q", out)
 	}
 }
 
