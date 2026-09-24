@@ -43,8 +43,7 @@ func (usagePlugin) HandleUsage(ctx context.Context, record sdkusage.Record) {
 	if startOpt != nil {
 		opts = append(opts, startOpt)
 	}
-	spanCtx, span := tracer.Start(ctx, spanName, opts...)
-	_ = spanCtx
+	_, span := tracer.Start(ctx, spanName, opts...)
 
 	attrs := []attribute.KeyValue{
 		attribute.String("cpa.provider", record.Provider),

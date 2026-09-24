@@ -1,61 +1,31 @@
 package observability
 
 import (
-	"net/http"
 	"regexp"
-	"strings"
 )
 
 // redactedPlaceholder replaces any credential value before it can reach a span
 // attribute, event, or captured payload.
 const redactedPlaceholder = "[REDACTED]"
 
-// sensitiveHeaderNames lists HTTP headers that must never be forwarded to a
-// span verbatim under any circumstance, per the ADR-001 privacy requirements.
-var sensitiveHeaderNames = map[string]struct{}{
-	"authorization":       {},
-	"proxy-authorization": {},
-	"cookie":              {},
-	"set-cookie":          {},
-	"x-api-key":           {},
-	"x-goog-api-key":      {},
-	"x-auth-token":        {},
-}
-
 // sensitiveValuePatterns matches credential-shaped substrings that may appear
 // embedded inside otherwise-safe text (captured bodies, error messages), so
 // redaction is applied even when the credential did not arrive via a
 // known-sensitive header.
+//
+// The key/value pattern (last entry) allows an optional quote both before and
+// after the key name so it also matches JSON-encoded forms such as
+// `{"api_key": "..."}` or `{"key": "..."}`, not only bare `key=value` text; the
+// value character class is case-insensitive (via the leading (?i)) so it also
+// covers Google-style API keys, which are mixed case (see the dedicated AIza
+// pattern below for the header/bare-value form of the same key shape).
 var sensitiveValuePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)bearer\s+[a-z0-9._~+/=-]+`),
 	regexp.MustCompile(`(?i)basic\s+[a-z0-9+/=]+`),
 	regexp.MustCompile(`sk-[a-zA-Z0-9_-]{10,}`),
 	regexp.MustCompile(`ya29\.[a-zA-Z0-9_-]{10,}`),
-	regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|secret)\s*[:=]\s*["']?[a-z0-9._~+/=-]{8,}`),
-}
-
-// isSensitiveHeader reports whether name (any casing) must be stripped before
-// it can reach a span.
-func isSensitiveHeader(name string) bool {
-	_, ok := sensitiveHeaderNames[strings.ToLower(strings.TrimSpace(name))]
-	return ok
-}
-
-// redactHeaders returns a copy of h with every sensitive header value replaced
-// by a placeholder. Non-sensitive headers pass through unchanged.
-func redactHeaders(h http.Header) map[string]string {
-	if len(h) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(h))
-	for name, values := range h {
-		if isSensitiveHeader(name) {
-			out[name] = redactedPlaceholder
-			continue
-		}
-		out[name] = strings.Join(values, ",")
-	}
-	return out
+	regexp.MustCompile(`AIza[0-9A-Za-z_-]{30,}`),
+	regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|secret|\bkey)["']?\s*[:=]\s*["']?[a-z0-9._~+/=-]{8,}`),
 }
 
 // redactText scrubs credential-shaped substrings out of free-form text such as

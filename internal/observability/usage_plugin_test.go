@@ -8,10 +8,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	sdkusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 func baseRecord() sdkusage.Record {
@@ -108,13 +111,31 @@ func TestUsagePlugin_RecordsProviderError(t *testing.T) {
 	}
 }
 
-func TestUsagePlugin_GenerationSpanNestsUnderHTTPRootSpan(t *testing.T) {
+// TestUsagePlugin_GenerationSpanNestsUnderHTTPRootSpan_RealHandlerCtxChain is
+// the disprovable nesting assertion: it drives a real HTTP request through
+// the same gin middleware chain and context plumbing production handlers use
+// (observability.Middleware -> BaseAPIHandler.GetContextWithCancel, exactly
+// as every provider handler calls it before invoking an executor), instead
+// of a hand-built context.Context that skips GetContextWithCancel entirely.
+// GetContextWithCancel intentionally derives its returned context from
+// context.Background() (so request cancellation does not tear down
+// in-flight work), which is exactly the mechanism that used to drop the
+// OTEL SpanContext started by Middleware; a hand-built ctx cannot exercise
+// that code path. This test would fail if GetContextWithCancel stopped
+// propagating the SpanContext.
+func TestUsagePlugin_GenerationSpanNestsUnderHTTPRootSpan_RealHandlerCtxChain(t *testing.T) {
 	exp := initInMemoryProvider(t)
 
-	tracer := activeTracer()
-	ctx, rootSpan := tracer.Start(context.Background(), "GET /v1/chat/completions", trace.WithSpanKind(trace.SpanKindServer))
-	usagePlugin{}.HandleUsage(ctx, baseRecord())
-	rootSpan.End()
+	r := newGinTestRouter()
+	r.GET("/v1/chat/completions", func(c *gin.Context) {
+		handler := &handlers.BaseAPIHandler{Cfg: &config.SDKConfig{}}
+		cliCtx, cancel := handler.GetContextWithCancel(nil, c, context.Background())
+		defer cancel()
+
+		usagePlugin{}.HandleUsage(cliCtx, baseRecord())
+		c.Status(http.StatusOK)
+	})
+	performRequest(r, http.MethodGet, "/v1/chat/completions")
 	forceFlush(t)
 
 	spans := exp.GetSpans()
@@ -122,21 +143,29 @@ func TestUsagePlugin_GenerationSpanNestsUnderHTTPRootSpan(t *testing.T) {
 		t.Fatalf("expected root span + generation span, got %d", len(spans))
 	}
 
-	var rootSpanID, genParentID trace.SpanID
-	for _, s := range spans {
-		snap := s.Snapshot()
-		switch snap.Name() {
+	var rootSpan, genSpan *tracetest.SpanStub
+	for i := range spans {
+		snap := &spans[i]
+		switch snap.Name {
 		case "GET /v1/chat/completions":
-			rootSpanID = snap.SpanContext().SpanID()
+			rootSpan = snap
 		case "generation openai":
-			genParentID = snap.Parent().SpanID()
+			genSpan = snap
 		}
 	}
-	if rootSpanID == (trace.SpanID{}) {
-		t.Fatalf("expected to find the HTTP root span")
+	if rootSpan == nil {
+		t.Fatalf("expected to find the HTTP root span, spans=%+v", spans)
 	}
-	if genParentID != rootSpanID {
-		t.Fatalf("expected generation span's parent span id to equal the HTTP root span id, got parent=%s root=%s", genParentID, rootSpanID)
+	if genSpan == nil {
+		t.Fatalf("expected to find the generation span, spans=%+v", spans)
+	}
+	if genSpan.SpanContext.TraceID() != rootSpan.SpanContext.TraceID() {
+		t.Fatalf("expected generation span to share the HTTP root span's trace id, got generation=%s root=%s",
+			genSpan.SpanContext.TraceID(), rootSpan.SpanContext.TraceID())
+	}
+	if genSpan.Parent.SpanID() != rootSpan.SpanContext.SpanID() {
+		t.Fatalf("expected generation span's parent span id to equal the HTTP root span id, got parent=%s root=%s",
+			genSpan.Parent.SpanID(), rootSpan.SpanContext.SpanID())
 	}
 }
 
