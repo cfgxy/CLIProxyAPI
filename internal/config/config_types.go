@@ -287,6 +287,78 @@ type PprofConfig struct {
 	Addr string `yaml:"addr" json:"addr"`
 }
 
+// ObservabilityConfig controls optional OpenTelemetry tracing export (e.g. to a
+// self-hosted Langfuse instance via OTLP/HTTP). Disabled by default: when Enabled
+// is false, no spans, exporters, or background goroutines are created.
+//
+// Secrets (the exporter Basic Auth public/secret key) are never stored in this
+// struct or in config.yaml; only the names of the environment variables that hold
+// them are configured here, and the values are resolved at runtime from the
+// process environment.
+type ObservabilityConfig struct {
+	// Enabled toggles OpenTelemetry tracing export. Default: false.
+	Enabled bool `yaml:"enabled" json:"enabled"`
+
+	// ServiceName sets the OTEL resource service.name attribute. Defaults to "cli-proxy-api".
+	ServiceName string `yaml:"service-name" json:"service-name"`
+
+	// Exporter configures the OTLP/HTTP span exporter.
+	Exporter ObservabilityExporterConfig `yaml:"exporter" json:"exporter"`
+
+	// Capture controls optional request/response payload capture on spans.
+	Capture ObservabilityCaptureConfig `yaml:"capture" json:"capture"`
+}
+
+// ObservabilityExporterConfig configures the OTLP/HTTP span exporter and its
+// Fail-Open behavior: an unreachable or slow collector must never block or slow
+// down model requests, and a full queue drops spans rather than blocking.
+type ObservabilityExporterConfig struct {
+	// Endpoint is the OTLP/HTTP traces endpoint, e.g. "https://<LANGFUSE_HOST>/api/public/otel".
+	// Required when Enabled is true.
+	Endpoint string `yaml:"endpoint" json:"endpoint"`
+
+	// PublicKeyEnv/SecretKeyEnv name the environment variables holding the exporter
+	// Basic Auth credentials (Langfuse Project Public Key / Secret Key). Defaults to
+	// LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY when empty. The credential values
+	// themselves must never appear in config.yaml.
+	PublicKeyEnv string `yaml:"public-key-env" json:"public-key-env"`
+	SecretKeyEnv string `yaml:"secret-key-env" json:"secret-key-env"`
+
+	// Insecure allows plaintext HTTP to the exporter endpoint (for local testing only).
+	Insecure bool `yaml:"insecure" json:"insecure"`
+
+	// TimeoutSeconds bounds a single export HTTP call. Default: 5.
+	TimeoutSeconds int `yaml:"timeout-seconds" json:"timeout-seconds"`
+
+	// MaxQueueSize bounds the in-memory pending-span queue; once full, new spans are
+	// dropped rather than blocking the request path. Default: 2048.
+	MaxQueueSize int `yaml:"max-queue-size" json:"max-queue-size"`
+
+	// MaxExportBatchSize bounds how many spans are sent per export call. Default: 512.
+	MaxExportBatchSize int `yaml:"max-export-batch-size" json:"max-export-batch-size"`
+
+	// BatchTimeoutSeconds bounds how long the batch processor waits before exporting
+	// a partially-filled batch. Default: 5.
+	BatchTimeoutSeconds int `yaml:"batch-timeout-seconds" json:"batch-timeout-seconds"`
+
+	// ShutdownTimeoutSeconds bounds the flush performed during graceful process
+	// shutdown; the flush never blocks shutdown indefinitely. Default: 5.
+	ShutdownTimeoutSeconds int `yaml:"shutdown-timeout-seconds" json:"shutdown-timeout-seconds"`
+}
+
+// ObservabilityCaptureConfig controls optional request/response payload capture.
+// Both toggles default to false; the capture capability exists so each can be
+// independently enabled, but redaction of credentials always applies regardless
+// of these toggles.
+type ObservabilityCaptureConfig struct {
+	// Input captures the request payload on the generation span. Default: false.
+	Input bool `yaml:"input" json:"input"`
+	// Output captures the response payload on the generation span. Default: false.
+	Output bool `yaml:"output" json:"output"`
+	// MaxBytes truncates captured input/output payloads. Default: 4096.
+	MaxBytes int `yaml:"max-bytes" json:"max-bytes"`
+}
+
 // DiscoveryInterfacesConfig specifies interface inclusion and exclusion rules.
 type DiscoveryInterfacesConfig struct {
 	Include []string `yaml:"include" json:"include"`

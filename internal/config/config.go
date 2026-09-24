@@ -190,4 +190,8 @@ type Config struct {
 
 	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
+
+	// Observability configures optional OpenTelemetry tracing export (e.g. to a
+	// self-hosted Langfuse instance via OTLP/HTTP). Disabled by default.
+	Observability ObservabilityConfig `yaml:"observability" json:"observability"`
 }
