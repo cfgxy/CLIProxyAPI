@@ -26,6 +26,7 @@ import (
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/tidwall/gjson"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/net/context"
 )
 
@@ -491,6 +492,18 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
 		} else if requestID = logging.GetGinRequestID(c); requestID != "" {
 			parentCtx = logging.WithRequestID(parentCtx, requestID)
+		}
+	}
+	// Propagate the OTEL SpanContext (if any) recorded on the inbound HTTP
+	// request context onto parentCtx, so that generation spans started later
+	// from newCtx nest underneath the Layer-1 HTTP root span created by
+	// observability.Middleware. This only carries the span identity forward;
+	// it deliberately does not adopt requestCtx as the cancellation parent,
+	// preserving this function's documented decouple-from-request-lifetime
+	// behavior.
+	if requestCtx != nil {
+		if spanCtx := trace.SpanContextFromContext(requestCtx); spanCtx.IsValid() {
+			parentCtx = trace.ContextWithSpanContext(parentCtx, spanCtx)
 		}
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
