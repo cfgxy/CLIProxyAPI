@@ -1119,6 +1119,14 @@ observability:
 #     input: false                     # Capture request payloads onto spans (redacted). Default off.
 #     output: false                    # Capture response payloads onto spans (redacted). Default off.
 #     max-bytes: 4096                  # Truncates captured payloads
+#   identity:
+#     # Spans always carry a non-empty "user.id" so the tracing backend can
+#     # group calls per caller. By default that value is an irreversible
+#     # salted SHA-256 digest, so no API key, token or account identifier a
+#     # client happens to send ever reaches the backend verbatim.
+#     # Set this to true ONLY for a deployment that is allowed to store raw
+#     # account identifiers in its tracing backend.
+#     plaintext-user-id: false
 
 # Standard dynamic library plugins are trusted in-process code. They are disabled by default.
 # Build Go examples with go build -buildmode=c-shared for the target GOOS/GOARCH.

@@ -180,3 +180,15 @@ func activeCaptureSettings() (input, output bool, maxBytes int) {
 	}
 	return current.settings.captureInput, current.settings.captureOutput, current.settings.captureMaxBytes
 }
+
+// activePlaintextUserID reports whether the resolved caller identity may be
+// written to spans verbatim. It defaults to false, including when tracing is
+// disabled, so the irreversible digest is always the fallback behaviour.
+func activePlaintextUserID() bool {
+	providerMu.RLock()
+	defer providerMu.RUnlock()
+	if current == nil {
+		return false
+	}
+	return current.settings.plaintextUserID
+}

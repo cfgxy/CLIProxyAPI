@@ -307,6 +307,21 @@ type ObservabilityConfig struct {
 
 	// Capture controls optional request/response payload capture on spans.
 	Capture ObservabilityCaptureConfig `yaml:"capture" json:"capture"`
+
+	// Identity controls how the caller/session dimensions are reported on spans.
+	Identity ObservabilityIdentityConfig `yaml:"identity" json:"identity"`
+}
+
+// ObservabilityIdentityConfig controls how the caller identity reported as the
+// span "user.id" attribute is encoded. The default is an irreversible salted
+// SHA-256 digest, so no account identifier a client happens to send ever
+// reaches the tracing backend verbatim.
+type ObservabilityIdentityConfig struct {
+	// PlaintextUserID emits the resolved caller identity verbatim instead of the
+	// default irreversible digest. Enable it only for a deployment that is
+	// allowed to store raw account identifiers in its tracing backend.
+	// Default: false.
+	PlaintextUserID bool `yaml:"plaintext-user-id" json:"plaintext-user-id"`
 }
 
 // ObservabilityExporterConfig configures the OTLP/HTTP span exporter and its
