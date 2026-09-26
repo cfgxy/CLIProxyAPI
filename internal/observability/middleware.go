@@ -44,8 +44,10 @@ func Middleware() gin.HandlerFunc {
 		}
 
 		// The identity holder is published on the request context before the
-		// handler chain runs so the generation span recorded inside c.Next()
-		// reports the same caller and session dimensions as this root span.
+		// handler chain runs, so both the execution path (which reports the
+		// session the request is actually routed on) and the usage plugin
+		// (which records the generation span, possibly after this request has
+		// returned) share the dimensions resolved for this request.
 		holder := newIdentityHolder(c)
 		ctx = withIdentityHolder(ctx, holder)
 
@@ -79,8 +81,9 @@ func Middleware() gin.HandlerFunc {
 		}
 
 		// Resolved after the handler chain: the caller credential is only set by
-		// the auth middleware, and the session identity the request was actually
-		// routed on is only observed when the usage record is published.
+		// the auth middleware, and the routed session is observed from inside
+		// the execution path. Both happen while the request is still open, which
+		// is what lets this span report them before it ends.
 		span.SetAttributes(identityAttributes(holder.snapshot(), activePlaintextUserID())...)
 
 		status := c.Writer.Status()
