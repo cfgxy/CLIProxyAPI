@@ -43,14 +43,25 @@ func Middleware() gin.HandlerFunc {
 			ctx = internallogging.WithRequestID(ctx, requestID)
 		}
 
+		// The identity holder is published on the request context before the
+		// handler chain runs so the generation span recorded inside c.Next()
+		// reports the same caller and session dimensions as this root span.
+		holder := newIdentityHolder(c)
+		ctx = withIdentityHolder(ctx, holder)
+
 		c.Request = c.Request.WithContext(ctx)
 
 		captureInput, captureOutput, maxBytes := activeCaptureSettings()
+		var rawBody []byte
+		if captureInput || bodyCarriesIdentity(c.Request) {
+			rawBody = readAndRestoreBody(c)
+		}
 		if captureInput {
-			if body := captureRequestBody(c, maxBytes); body != "" {
+			if body := captureRequestBody(rawBody, maxBytes); body != "" {
 				span.SetAttributes(attribute.String("cpa.capture.input", body))
 			}
 		}
+		holder.seed(extractIdentity(c.Request.Header, rawBody))
 		var respWriter *captureResponseWriter
 		if captureOutput {
 			respWriter = newCaptureResponseWriter(c.Writer, maxBytes)
@@ -66,6 +77,11 @@ func Middleware() gin.HandlerFunc {
 				span.SetAttributes(attribute.String("cpa.capture.output", body))
 			}
 		}
+
+		// Resolved after the handler chain: the caller credential is only set by
+		// the auth middleware, and the session identity the request was actually
+		// routed on is only observed when the usage record is published.
+		span.SetAttributes(identityAttributes(holder.snapshot(), activePlaintextUserID())...)
 
 		status := c.Writer.Status()
 		span.SetAttributes(
