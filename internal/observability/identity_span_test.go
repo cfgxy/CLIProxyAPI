@@ -10,8 +10,10 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	sdkusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/config"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
@@ -232,8 +234,9 @@ func TestMiddleware_EnabledRestoresRequestBody(t *testing.T) {
 }
 
 // TestUsagePlugin_GenerationSpanCarriesSessionAndUser is deliverable P1 for the
-// generation span, including the write-back that keeps the HTTP root span in
-// sync with the session the request was actually routed on.
+// generation span: the session the usage record reports wins over the one
+// recognized at ingress, because the record carries the identity the request
+// was actually routed on.
 func TestUsagePlugin_GenerationSpanCarriesSessionAndUser(t *testing.T) {
 	exp := initIdentityProvider(t, false)
 
@@ -259,12 +262,116 @@ func TestUsagePlugin_GenerationSpanCarriesSessionAndUser(t *testing.T) {
 	if generation[attrUserID] == "" {
 		t.Fatal("generation span is missing user.id")
 	}
+}
 
-	root := spanAttrs(t, spanNamed(t, spans, "POST /v1/messages"))
-	if root[attrSessionID] != routedSession {
-		t.Fatalf("root session.id = %q, want the routed session %q", root[attrSessionID], routedSession)
+// TestMiddleware_RootSpanReportsRoutedSessionThroughHandlerCtxChain is the
+// production form of the root-span session guarantee. The routed session is
+// resolved inside the execution path, on a context that
+// BaseAPIHandler.GetContextWithCancel deliberately derives from
+// context.Background() rather than from the request context; the notification
+// must still reach the span that ends with the request. A hand-built context
+// cannot exercise that plumbing, and the write-back the usage plugin used to
+// rely on cannot either, because the usage manager hands records to its worker
+// goroutine only after the request has returned.
+func TestMiddleware_RootSpanReportsRoutedSessionThroughHandlerCtxChain(t *testing.T) {
+	exp := initIdentityProvider(t, false)
+
+	ingressSession := "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	routedSession := "ctx:v1:deerflow-thread-42"
+	router := newIdentityRouter(t, testAPIKey, func(c *gin.Context) {
+		handler := &handlers.BaseAPIHandler{Cfg: &config.SDKConfig{}}
+		cliCtx, cancel := handler.GetContextWithCancel(nil, c, context.Background())
+		defer cancel()
+
+		// Stands in for sdk/cliproxy/auth.syncMetadataSessionToContext, which is
+		// the single point where the canonical routed session becomes known.
+		internallogging.ObserveSession(cliCtx, routedSession, "")
+		c.Status(http.StatusOK)
+	})
+	body := `{"model":"claude-sonnet-4","metadata":{"user_id":"{\"account_uuid\":\"` + testAccountUUID + `\",\"session_id\":\"` + ingressSession + `\"}"}}`
+	postJSON(router, body, nil)
+	forceFlush(t)
+
+	root := spanAttrs(t, spanNamed(t, exp.GetSpans(), "POST /v1/messages"))
+	want := coresession.NormalizeToCanonicalUUID(routedSession)
+	if root[attrSessionID] != want {
+		t.Fatalf("root session.id = %q, want the routed session %q", root[attrSessionID], want)
 	}
-	if root[attrUserID] != generation[attrUserID] {
+	if root[attrSessionID] == ingressSession {
+		t.Fatal("root span reported the ingress session instead of the routed one")
+	}
+}
+
+// awaitPlugin lets the test observe when the usage manager's worker goroutine
+// has finished handing a record to the observability plugin.
+type awaitPlugin struct {
+	done chan struct{}
+}
+
+func (p awaitPlugin) HandleUsage(ctx context.Context, record sdkusage.Record) {
+	usagePlugin{}.HandleUsage(ctx, record)
+	close(p.done)
+}
+
+// gatePlugin blocks the manager's single worker goroutine so the test can prove
+// the record is handled strictly after the HTTP request has ended.
+type gatePlugin struct {
+	release chan struct{}
+}
+
+func (p gatePlugin) HandleUsage(ctx context.Context, record sdkusage.Record) {
+	<-p.release
+}
+
+// TestUsagePlugin_GenerationSpanHandledAfterRequestEndMatchesRootSpan drives the
+// real dispatch form: the record goes through the usage manager queue and is
+// handled by its worker goroutine only after the HTTP request has returned and
+// the root span has ended. Both spans must still report the same session and
+// the same non-anonymous user.
+func TestUsagePlugin_GenerationSpanHandledAfterRequestEndMatchesRootSpan(t *testing.T) {
+	exp := initIdentityProvider(t, false)
+
+	routedSession := "ctx:v1:deerflow-thread-77"
+	release := make(chan struct{})
+	handled := make(chan struct{})
+	manager := sdkusage.NewManager(8)
+	manager.Register(gatePlugin{release: release})
+	manager.Register(awaitPlugin{done: handled})
+	t.Cleanup(manager.Stop)
+
+	router := newIdentityRouter(t, testAPIKey, func(c *gin.Context) {
+		handler := &handlers.BaseAPIHandler{Cfg: &config.SDKConfig{}}
+		cliCtx, cancel := handler.GetContextWithCancel(nil, c, context.Background())
+		defer cancel()
+
+		internallogging.ObserveSession(cliCtx, routedSession, "")
+		record := baseRecord()
+		record.SessionID = routedSession
+		manager.Publish(cliCtx, record)
+		c.Status(http.StatusOK)
+	})
+	postJSON(router, `{"model":"gpt-4o","messages":[]}`, nil)
+
+	// The request has returned, so the root span is already ended and closed to
+	// further attributes. Only now is the worker allowed to reach the plugin.
+	close(release)
+	<-handled
+	forceFlush(t)
+
+	spans := exp.GetSpans()
+	root := spanAttrs(t, spanNamed(t, spans, "POST /v1/messages"))
+	generation := spanAttrs(t, spanNamed(t, spans, "generation openai"))
+	want := coresession.NormalizeToCanonicalUUID(routedSession)
+	if generation[attrSessionID] != want {
+		t.Fatalf("generation session.id = %q, want %q", generation[attrSessionID], want)
+	}
+	if root[attrSessionID] != want {
+		t.Fatalf("root session.id = %q, want %q", root[attrSessionID], want)
+	}
+	if generation[attrUserID] == anonymousUserID {
+		t.Fatalf("generation user.id fell back to %q although the caller credential was known", anonymousUserID)
+	}
+	if generation[attrUserID] != root[attrUserID] {
 		t.Fatalf("root and generation spans disagree on user.id: %q vs %q", root[attrUserID], generation[attrUserID])
 	}
 }

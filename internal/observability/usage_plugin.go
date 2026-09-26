@@ -107,17 +107,22 @@ func (usagePlugin) HandleUsage(ctx context.Context, record sdkusage.Record) {
 	span.End(endOpts...)
 }
 
-// resolveIdentityAttributes merges the identity recognized at ingress with the
-// session the request was actually routed on, which the usage record reports.
-// The merged result is written back to the holder so the HTTP root span ends
-// up reporting the same session as this generation span.
+// resolveIdentityAttributes merges the caller dimensions resolved for the
+// inbound request with the session the usage record reports, which is the one
+// the request was actually routed on and therefore wins over the one recognized
+// at ingress.
+//
+// Nothing is written back to the holder: this function runs on the usage
+// manager's worker goroutine, typically after the request has returned and its
+// root span has been ended, so a write-back could not reach that span. The root
+// span gets the routed session synchronously instead, from the execution path
+// via logging.ObserveSession.
 //
 // A record published outside an HTTP request (no holder on the context) still
 // produces a complete attribute set: user.id falls back to the anonymous
 // literal rather than being omitted.
 func resolveIdentityAttributes(ctx context.Context, record sdkusage.Record) []attribute.KeyValue {
-	holder := identityHolderFrom(ctx)
-	id := holder.snapshot()
+	id := identityHolderFrom(ctx).snapshot()
 	if sessionID := coresession.NormalizeToCanonicalUUID(record.SessionID); sessionID != "" {
 		parentID := coresession.NormalizeToCanonicalUUID(record.ParentSessionID)
 		if parentID == sessionID {
@@ -125,7 +130,6 @@ func resolveIdentityAttributes(ctx context.Context, record sdkusage.Record) []at
 		}
 		id.sessionID = sessionID
 		id.parentSessionID = parentID
-		holder.observeSession(sessionID, parentID)
 	}
 	return identityAttributes(id, activePlaintextUserID())
 }

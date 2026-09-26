@@ -508,6 +508,13 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		if spanCtx := trace.SpanContextFromContext(requestCtx); spanCtx.IsValid() {
 			parentCtx = trace.ContextWithSpanContext(parentCtx, spanCtx)
 		}
+		// Same reasoning for the request identity carrier: the execution path
+		// publishes the routed session to it, and the usage plugin reads the
+		// caller dimensions from it when it records the generation span. Without
+		// this hop neither would reach a context derived from context.Background().
+		if identity := logging.RequestIdentityFrom(requestCtx); identity != nil {
+			parentCtx = logging.WithRequestIdentity(parentCtx, identity)
+		}
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
 

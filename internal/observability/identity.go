@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/gin-gonic/gin"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 	coresession "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/session"
 	"github.com/tidwall/gjson"
 	"go.opentelemetry.io/otel/attribute"
@@ -79,16 +80,19 @@ type identity struct {
 // identityHolder carries the per-request identity across the middleware /
 // usage-plugin boundary. It has to be mutable: the generation span is produced
 // inside c.Next(), the caller credential only exists after the auth middleware
-// has run, and the session identity the executor actually routed on is only
-// known once the usage record is published.
+// has run, and the session identity the executor actually routed on becomes
+// known only once routing has picked it.
+//
+// It implements internal/logging.RequestIdentity, which is the carrier the
+// execution path publishes the routed session to. That indirection exists so
+// sdk/cliproxy/auth and sdk/api/handlers can reach the holder without importing
+// this package.
 type identityHolder struct {
 	mu     sync.Mutex
 	id     identity
 	ginCtx *gin.Context
 	scoped bool
 }
-
-type identityHolderKey struct{}
 
 // newIdentityHolder binds a holder to the gin context so the caller scope can
 // be resolved lazily, after the auth middleware has stored the API key.
@@ -97,14 +101,14 @@ func newIdentityHolder(c *gin.Context) *identityHolder {
 }
 
 func withIdentityHolder(ctx context.Context, holder *identityHolder) context.Context {
-	return context.WithValue(ctx, identityHolderKey{}, holder)
+	if holder == nil {
+		return ctx
+	}
+	return internallogging.WithRequestIdentity(ctx, holder)
 }
 
 func identityHolderFrom(ctx context.Context) *identityHolder {
-	if ctx == nil {
-		return nil
-	}
-	holder, _ := ctx.Value(identityHolderKey{}).(*identityHolder)
+	holder, _ := internallogging.RequestIdentityFrom(ctx).(*identityHolder)
 	return holder
 }
 
@@ -122,23 +126,43 @@ func (h *identityHolder) seed(id identity) {
 	}
 }
 
-// observeSession records the session identity the request was actually routed
-// on, so the HTTP root span reports the same value as the generation span.
-func (h *identityHolder) observeSession(sessionID, parentSessionID string) {
-	if h == nil || sessionID == "" {
+// ObserveSession records the session identity the request was actually routed
+// on. It is called from the execution path while the request is still open, so
+// both the HTTP root span and the generation span report the same value even
+// though the latter is produced after the request has returned.
+//
+// The incoming identifier is whatever routing resolved (a canonical UUID, an
+// opaque bound identity, or a "ctx:v1:" derived one), so it is normalized here
+// rather than at every call site.
+func (h *identityHolder) ObserveSession(sessionID, parentSessionID string) {
+	if h == nil {
 		return
+	}
+	normalized := coresession.NormalizeToCanonicalUUID(sessionID)
+	if normalized == "" {
+		return
+	}
+	parent := coresession.NormalizeToCanonicalUUID(parentSessionID)
+	if parent == normalized {
+		parent = ""
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.id.sessionID = sessionID
-	if parentSessionID != "" {
-		h.id.parentSessionID = parentSessionID
+	h.id.sessionID = normalized
+	if parent != "" {
+		h.id.parentSessionID = parent
+	} else if h.id.parentSessionID == normalized {
+		h.id.parentSessionID = ""
 	}
 }
 
 // snapshot returns the current identity, resolving the caller scope on first
 // read because the auth middleware runs after the observability middleware has
 // already started the root span.
+//
+// The holder outlives the request (the usage record is handled asynchronously),
+// so the gin context pointer is dropped as soon as the caller scope has been
+// derived from it and nothing else needs it.
 func (h *identityHolder) snapshot() identity {
 	if h == nil {
 		return identity{}
@@ -150,6 +174,7 @@ func (h *identityHolder) snapshot() identity {
 			h.id.callerScope = scope
 		}
 		h.scoped = true
+		h.ginCtx = nil
 	}
 	return h.id
 }
