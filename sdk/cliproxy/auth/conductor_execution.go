@@ -2149,5 +2149,10 @@ func syncMetadataSessionToContext(ctx context.Context, metadata map[string]any) 
 		clientMeta.IsCompaction = false
 	}
 	ctx = logging.WithClientRequestMetadata(ctx, clientMeta)
+	// This is the only synchronous point at which the session the request is
+	// actually routed on becomes known while the inbound HTTP request is still
+	// open. Consumers that must report it before the request ends (the
+	// observability HTTP root span) are notified here.
+	logging.ObserveSession(ctx, clientMeta.SessionID, clientMeta.ParentSessionID)
 	return util.WithSessionID(ctx, clientMeta.SessionID)
 }

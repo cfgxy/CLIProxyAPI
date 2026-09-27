@@ -36,6 +36,8 @@ type settings struct {
 	captureInput    bool
 	captureOutput   bool
 	captureMaxBytes int
+
+	plaintextUserID bool
 }
 
 // resolveSettings validates and normalizes an ObservabilityConfig, resolving
@@ -50,6 +52,7 @@ func resolveSettings(cfg appconfig.ObservabilityConfig) (settings, error) {
 		captureInput:    cfg.Capture.Input,
 		captureOutput:   cfg.Capture.Output,
 		captureMaxBytes: cfg.Capture.MaxBytes,
+		plaintextUserID: cfg.Identity.PlaintextUserID,
 	}
 	if !s.enabled {
 		return s, nil

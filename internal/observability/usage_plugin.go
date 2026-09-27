@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 
+	coresession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	sdkusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -81,6 +82,7 @@ func (usagePlugin) HandleUsage(ctx context.Context, record sdkusage.Record) {
 	if record.Detail.ReasoningTokens > 0 {
 		attrs = append(attrs, attribute.Int64("cpa.usage.reasoning_tokens", record.Detail.ReasoningTokens))
 	}
+	attrs = append(attrs, resolveIdentityAttributes(ctx, record)...)
 	span.SetAttributes(attrs...)
 
 	if record.Failed {
@@ -103,6 +105,33 @@ func (usagePlugin) HandleUsage(ctx context.Context, record sdkusage.Record) {
 		endOpts = append(endOpts, trace.WithTimestamp(start.Add(record.Latency)))
 	}
 	span.End(endOpts...)
+}
+
+// resolveIdentityAttributes merges the caller dimensions resolved for the
+// inbound request with the session the usage record reports, which is the one
+// the request was actually routed on and therefore wins over the one recognized
+// at ingress.
+//
+// Nothing is written back to the holder: this function runs on the usage
+// manager's worker goroutine, typically after the request has returned and its
+// root span has been ended, so a write-back could not reach that span. The root
+// span gets the routed session synchronously instead, from the execution path
+// via logging.ObserveSession.
+//
+// A record published outside an HTTP request (no holder on the context) still
+// produces a complete attribute set: user.id falls back to the anonymous
+// literal rather than being omitted.
+func resolveIdentityAttributes(ctx context.Context, record sdkusage.Record) []attribute.KeyValue {
+	id := identityHolderFrom(ctx).snapshot()
+	if sessionID := coresession.NormalizeToCanonicalUUID(record.SessionID); sessionID != "" {
+		parentID := coresession.NormalizeToCanonicalUUID(record.ParentSessionID)
+		if parentID == sessionID {
+			parentID = ""
+		}
+		id.sessionID = sessionID
+		id.parentSessionID = parentID
+	}
+	return identityAttributes(id, activePlaintextUserID())
 }
 
 // providerError adapts a failed usage.Record into an error value so it can be
