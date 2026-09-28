@@ -36,6 +36,7 @@ type settings struct {
 	captureInput    bool
 	captureOutput   bool
 	captureMaxBytes int
+	captureUpstream bool
 
 	plaintextUserID bool
 }
@@ -52,6 +53,7 @@ func resolveSettings(cfg appconfig.ObservabilityConfig) (settings, error) {
 		captureInput:    cfg.Capture.Input,
 		captureOutput:   cfg.Capture.Output,
 		captureMaxBytes: cfg.Capture.MaxBytes,
+		captureUpstream: cfg.Capture.Upstream,
 		plaintextUserID: cfg.Identity.PlaintextUserID,
 	}
 	if !s.enabled {

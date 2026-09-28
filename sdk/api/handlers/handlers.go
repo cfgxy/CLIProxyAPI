@@ -512,6 +512,7 @@ func (h *BaseAPIHandler) GetContextWithCancel(handler interfaces.APIHandler, c *
 		if identity := logging.RequestIdentityFrom(requestCtx); identity != nil {
 			parentCtx = logging.WithRequestIdentity(parentCtx, identity)
 		}
+		parentCtx = coreusage.PropagateUpstreamCaptureEnabled(parentCtx, requestCtx)
 	}
 	newCtx, cancel := context.WithCancel(parentCtx)
 

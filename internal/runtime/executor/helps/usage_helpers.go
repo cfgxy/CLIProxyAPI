@@ -83,6 +83,7 @@ func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	usage.UpstreamCaptureFromContext(ctx).Arm()
 	apiKey := APIKeyFromContext(ctx)
 	alias := usage.RequestedModelAliasFromContext(ctx)
 	if alias == "" {
