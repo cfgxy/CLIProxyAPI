@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/httpwire"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/net/http2"
@@ -417,11 +418,11 @@ func NewUtlsHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxyau
 	}
 
 	client := &http.Client{
-		Transport: &fallbackRoundTripper{
+		Transport: sdkusage.CaptureHTTPTransport(ctx, &fallbackRoundTripper{
 			anthropic: anthropicRT,
 			chrome:    chromeRT,
 			fallback:  standardTransport,
-		},
+		}),
 	}
 	if timeout > 0 {
 		client.Timeout = timeout

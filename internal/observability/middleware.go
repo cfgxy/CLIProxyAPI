@@ -5,6 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -50,6 +51,9 @@ func Middleware() gin.HandlerFunc {
 		// returned) share the dimensions resolved for this request.
 		holder := newIdentityHolder(c)
 		ctx = withIdentityHolder(ctx, holder)
+		if activeUpstreamCaptureEnabled() {
+			ctx = sdkusage.WithUpstreamCaptureEnabled(ctx)
+		}
 
 		c.Request = c.Request.WithContext(ctx)
 

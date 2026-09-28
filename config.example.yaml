@@ -1116,9 +1116,10 @@ observability:
 #     batch-timeout-seconds: 5
 #     shutdown-timeout-seconds: 5      # Bounds the graceful-shutdown flush
 #   capture:
-#     input: false                     # Capture request payloads onto spans (redacted). Default off.
-#     output: false                    # Capture response payloads onto spans (redacted). Default off.
-#     max-bytes: 4096                  # Truncates captured payloads
+#     input: false                     # Inbound HTTP body on root span (redacted). Default off.
+#     output: false                    # Response to client on root span (redacted). Default off.
+#     max-bytes: 4096                  # Bounds only the optional inbound/client capture
+#     upstream: false                  # Complete provider bodies on generation spans; raw private data. Default off.
 #   identity:
 #     # Spans always carry a non-empty "user.id" so the tracing backend can
 #     # group calls per caller. By default that value is an irreversible

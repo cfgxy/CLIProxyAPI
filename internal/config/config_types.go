@@ -362,16 +362,17 @@ type ObservabilityExporterConfig struct {
 }
 
 // ObservabilityCaptureConfig controls optional request/response payload capture.
-// Both toggles default to false; the capture capability exists so each can be
-// independently enabled, but redaction of credentials always applies regardless
-// of these toggles.
+// Inbound/client capture is redacted; upstream capture preserves provider body
+// bytes verbatim, including any secrets a caller includes in the body.
 type ObservabilityCaptureConfig struct {
-	// Input captures the request payload on the generation span. Default: false.
+	// Input captures the inbound HTTP request payload on the root span. Default: false.
 	Input bool `yaml:"input" json:"input"`
-	// Output captures the response payload on the generation span. Default: false.
+	// Output captures the HTTP response to the client on the root span. Default: false.
 	Output bool `yaml:"output" json:"output"`
-	// MaxBytes truncates captured input/output payloads. Default: 4096.
+	// MaxBytes bounds the optional inbound/outbound capture, not upstream capture.
 	MaxBytes int `yaml:"max-bytes" json:"max-bytes"`
+	// Upstream captures complete provider request and response bodies. Default: false.
+	Upstream bool `yaml:"upstream" json:"upstream"`
 }
 
 // DiscoveryInterfacesConfig specifies interface inclusion and exclusion rules.
