@@ -81,7 +81,26 @@ func TestResolveSettings_AppliesDefaultsAndReadsEnvCredentials(t *testing.T) {
 	if s.maxQueueSize != appconfig.DefaultObservabilityMaxQueueSize {
 		t.Fatalf("expected default max queue size, got %d", s.maxQueueSize)
 	}
-	if s.captureInput || s.captureOutput {
+	if s.captureInput || s.captureOutput || s.captureUpstream {
 		t.Fatalf("expected capture toggles to default to false")
+	}
+}
+
+func TestResolveSettings_UpstreamCaptureDoesNotAlterLegacyLimit(t *testing.T) {
+	t.Setenv("LANGFUSE_PUBLIC_KEY", "pub-value")
+	t.Setenv("LANGFUSE_SECRET_KEY", "sec-value")
+	s, err := resolveSettings(appconfig.ObservabilityConfig{
+		Enabled: true,
+		Exporter: appconfig.ObservabilityExporterConfig{
+			Endpoint: "https://example.invalid/api/public/otel/v1/traces",
+		},
+		Capture: appconfig.ObservabilityCaptureConfig{Upstream: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !s.captureUpstream || s.captureInput || s.captureOutput ||
+		s.captureMaxBytes != appconfig.DefaultObservabilityCaptureMaxBytes {
+		t.Fatalf("upstream toggle changed legacy ingress settings: %+v", s)
 	}
 }

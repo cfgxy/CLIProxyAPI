@@ -25,7 +25,8 @@ import (
 
 func newUpstreamAttemptContext(ctx context.Context) context.Context {
 	ctx = logging.WithFreshResponseHeadersHolder(ctx)
-	return cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
+	ctx = cliproxyexecutor.WithUpstreamAttemptTracker(ctx)
+	return coreusage.WithUpstreamCaptureAttempt(ctx)
 }
 
 func claudeOAuthRequestCancellation(ctx context.Context, auth *Auth, err error) error {

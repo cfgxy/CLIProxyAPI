@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/sjson"
@@ -48,7 +49,7 @@ func (e *CodexWebsocketsExecutor) dialCodexWebsocket(ctx context.Context, auth *
 	return conn, closer, resp, err
 }
 
-func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+func writeWebsocketPayloadMessage(ctx context.Context, provider string, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
 	provider = strings.TrimSpace(provider)
 	if provider == "" {
 		provider = "codex"
@@ -60,6 +61,7 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	sessionKind := sessionObjectKind(sess)
 	payloadBytes := len(payload)
 	start := time.Now()
+	finishCapture := sdkusage.UpstreamCaptureFromContext(ctx).BeginWebSocketSend(websocket.TextMessage, payload)
 	log.Debugf("%s websockets: write payload started session=%s session_object=%s bytes=%d", provider, sessionID, sessionKind, payloadBytes)
 	var errSend error
 	if sess != nil {
@@ -74,11 +76,12 @@ func writeWebsocketPayloadMessage(provider string, sess *codexWebsocketSession, 
 	} else {
 		log.Debugf("%s websockets: write payload completed session=%s session_object=%s bytes=%d duration=%v", provider, sessionID, sessionKind, payloadBytes, time.Since(start))
 	}
+	finishCapture(errSend == nil)
 	return errSend
 }
 
-func writeCodexWebsocketMessage(sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
-	return writeWebsocketPayloadMessage("codex", sess, conn, payload)
+func writeCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession, conn *websocket.Conn, payload []byte) error {
+	return writeWebsocketPayloadMessage(ctx, "codex", sess, conn, payload)
 }
 
 func mapCodexWebsocketWriteError(sess *codexWebsocketSession, conn *websocket.Conn, err error) error {
@@ -154,6 +157,9 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 		}
 		_ = conn.SetReadDeadline(time.Now().Add(codexResponsesWebsocketIdleTimeout))
 		msgType, payload, errRead := conn.ReadMessage()
+		if errRead == nil {
+			sdkusage.UpstreamCaptureFromContext(ctx).RecordWebSocket("received", msgType, payload)
+		}
 		return msgType, payload, errRead
 	}
 	if conn == nil {
@@ -172,6 +178,9 @@ func readCodexWebsocketMessage(ctx context.Context, sess *codexWebsocketSession,
 			}
 			if ev.conn != conn {
 				continue
+			}
+			if ev.msgType != 0 {
+				sdkusage.UpstreamCaptureFromContext(ctx).RecordWebSocket("received", ev.msgType, ev.rawPayload)
 			}
 			if ev.err != nil {
 				return 0, nil, ev.err

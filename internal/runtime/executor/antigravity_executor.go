@@ -23,6 +23,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
@@ -442,7 +443,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 	// existing lifecycle and different OAuth identities remain isolated.
 	if proxyURL := antigravityProxyURL(ctx, cfg, auth); proxyURL != "" {
 		if transport := antigravityProxiedHTTP11Transport(auth, proxyURL, cfg); transport != nil {
-			return &http.Client{Transport: transport, Timeout: timeout}
+			return &http.Client{Transport: sdkusage.CaptureHTTPTransport(ctx, transport), Timeout: timeout}
 		}
 		// Fall through so NewProxyAwareHTTPClient reports the failure and applies the
 		// context transport fallback, preserving the previous behavior.
@@ -450,14 +451,15 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 
 	client := helps.NewProxyAwareHTTPClient(ctx, cfg, auth, timeout)
 	// Direct requests share an HTTP/1.1 pool only within the selected credential.
-	if client.Transport == nil {
-		client.Transport = antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg)
+	base := sdkusage.UnwrapCapturedHTTPTransport(client.Transport)
+	if base == nil {
+		client.Transport = sdkusage.CaptureHTTPTransport(ctx, antigravityHTTP11Transport(auth, antigravityBaseTransport, cfg))
 		return client
 	}
 
 	// Preserve a context-provided transport while forcing HTTP/1.1. The cache key
 	// includes credential identity, so sharing the base does not share TLS pools.
-	transport, ok := client.Transport.(*http.Transport)
+	transport, ok := base.(*http.Transport)
 	if !ok {
 		// A RoundTripper that is not an *http.Transport owns its own protocol behavior.
 		return client
@@ -469,7 +471,7 @@ func newAntigravityHTTPClient(ctx context.Context, cfg *config.Config, auth *cli
 		// Antigravity fingerprint, so substitute the process base transport.
 		transport = antigravityBaseTransport
 	}
-	client.Transport = antigravityHTTP11Transport(auth, transport, cfg)
+	client.Transport = sdkusage.CaptureHTTPTransport(ctx, antigravityHTTP11Transport(auth, transport, cfg))
 	return client
 }
 
