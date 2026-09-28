@@ -3,7 +3,9 @@ package usage
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"mime"
 	"net/http"
 	"sync"
 )
@@ -52,8 +54,8 @@ func WebSocketTurnSnapshotFromContext(ctx context.Context) (UpstreamSnapshot, bo
 	return snapshot, ok
 }
 
-// CapturedHTTP describes exactly the application-level bytes consumed by the
-// transport and the caller, before any response translation or event parsing.
+// CapturedHTTP describes the application-level bytes sent to and read from the
+// provider, before any response translation or event parsing.
 type CapturedHTTP struct {
 	Method           string
 	Status           int
@@ -256,8 +258,8 @@ func (c *UpstreamCapture) FinishWebSocket(complete bool) {
 	c.notifyFinished()
 }
 
-// CaptureHTTPTransport wraps the selected transport without reading ahead,
-// mutating a request payload, or changing the response body seen by the caller.
+// CaptureHTTPTransport wraps the selected transport without mutating a request
+// payload or changing the response body seen by the caller.
 func CaptureHTTPTransport(ctx context.Context, base http.RoundTripper) http.RoundTripper {
 	capture := UpstreamCaptureFromContext(ctx)
 	if capture == nil {
@@ -300,7 +302,14 @@ func (t upstreamCaptureTransport) RoundTrip(req *http.Request) (*http.Response, 
 		return resp, err
 	}
 	call.setStatus(resp.StatusCode)
-	resp.Body = &capturingReadCloser{ReadCloser: resp.Body, onRead: call.addResponse, onEnd: call.finishResponse}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	responseBody := &capturingReadCloser{ReadCloser: resp.Body, onRead: call.addResponse, onEnd: call.finishResponse, ctx: req.Context()}
+	if mediaType == "text/event-stream" {
+		responseBody.drainOnClose = func() bool {
+			return req.Context().Done() != nil && req.Context().Err() == nil && call.hasTerminalSSEEvent()
+		}
+	}
+	resp.Body = responseBody
 	return resp, nil
 }
 
@@ -335,6 +344,38 @@ func (c *capturedHTTPCall) setStatus(status int) {
 	c.capture.mu.Unlock()
 }
 
+func (c *capturedHTTPCall) hasTerminalSSEEvent() bool {
+	c.capture.mu.Lock()
+	defer c.capture.mu.Unlock()
+	remaining := c.value.Response
+	for len(remaining) > 0 {
+		line, rest, found := bytes.Cut(remaining, []byte{'\n'})
+		if !found {
+			break
+		}
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if field, value, ok := bytes.Cut(line, []byte{':'}); ok {
+			value = bytes.TrimPrefix(value, []byte{' '})
+			if bytes.Equal(field, []byte("data")) && bytes.Equal(value, []byte("[DONE]")) {
+				return true
+			}
+			if bytes.Equal(field, []byte("data")) {
+				var event struct {
+					Type string `json:"type"`
+				}
+				if json.Unmarshal(value, &event) == nil {
+					switch event.Type {
+					case "response.completed", "response.done", "response.incomplete", "response.failed", "message_stop":
+						return true
+					}
+				}
+			}
+		}
+		remaining = rest
+	}
+	return false
+}
+
 func (c *capturedHTTPCall) finishResponse(eof bool) {
 	c.once.Do(func() {
 		c.capture.mu.Lock()
@@ -347,8 +388,11 @@ func (c *capturedHTTPCall) finishResponse(eof bool) {
 
 type capturingReadCloser struct {
 	io.ReadCloser
-	onRead func([]byte)
-	onEnd  func(bool)
+	onRead       func([]byte)
+	onEnd        func(bool)
+	drainOnClose func() bool
+	ctx          context.Context
+	closeOnce    sync.Once
 }
 
 func (r *capturingReadCloser) Read(p []byte) (int, error) {
@@ -357,13 +401,35 @@ func (r *capturingReadCloser) Read(p []byte) (int, error) {
 		r.onRead(p[:n])
 	}
 	if err != nil {
-		r.onEnd(err == io.EOF)
+		r.onEnd(err == io.EOF && (r.ctx == nil || r.ctx.Err() == nil))
 	}
 	return n, err
 }
 
 func (r *capturingReadCloser) Close() error {
-	err := r.ReadCloser.Close()
-	r.onEnd(false)
-	return err
+	var closeErr error
+	r.closeOnce.Do(func() {
+		if r.drainOnClose != nil && r.drainOnClose() {
+			// Drain after Close returns so a provider holding its SSE connection open
+			// cannot delay the caller; request cancellation still closes the body.
+			go func() {
+				finished := make(chan struct{})
+				go func() {
+					select {
+					case <-r.ctx.Done():
+						_ = r.ReadCloser.Close()
+					case <-finished:
+					}
+				}()
+				_, _ = io.Copy(io.Discard, r)
+				close(finished)
+				_ = r.ReadCloser.Close()
+				r.onEnd(false)
+			}()
+			return
+		}
+		closeErr = r.ReadCloser.Close()
+		r.onEnd(false)
+	})
+	return closeErr
 }

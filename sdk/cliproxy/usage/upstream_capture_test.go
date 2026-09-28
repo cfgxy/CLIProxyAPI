@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestUpstreamCaptureHTTPPreservesLargeRequestAndRawSSE(t *testing.T) {
@@ -96,6 +97,200 @@ func TestUpstreamCaptureReportsEarlyCloseInsteadOfClaimingCompleteness(t *testin
 	if !called || got.Complete || got.HTTP[0].ResponseComplete || string(got.HTTP[0].Response) != "res" {
 		t.Fatalf("expected a visible partial provider response, got %+v", got)
 	}
+}
+
+func TestUpstreamCaptureDrainsAfterSSETerminalEvent(t *testing.T) {
+	providerResponse := []byte("event: response.completed\r\ndata: {\"type\":\"response.completed\"}\r\n\r\ndata: [DONE]\r\n\r\n")
+	terminal := []byte("event: response.completed\r\ndata: {\"type\":\"response.completed\"}\r\n")
+	base, cancel := context.WithCancel(WithUpstreamCaptureEnabled(context.Background()))
+	defer cancel()
+	ctx := WithUpstreamCaptureAttempt(base)
+	capture := UpstreamCaptureFromContext(ctx)
+	capture.Arm()
+	client := &http.Client{Transport: CaptureHTTPTransport(ctx, sseCaptureTransport{body: providerResponse})}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://provider.invalid/model", strings.NewReader("request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumed := make([]byte, len(terminal))
+	if _, err := io.ReadFull(response.Body, consumed); err != nil {
+		t.Fatal(err)
+	}
+	snapshots := make(chan UpstreamSnapshot, 1)
+	capture.OnComplete(func(got UpstreamSnapshot) { snapshots <- got })
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot UpstreamSnapshot
+	select {
+	case snapshot = <-snapshots:
+	case <-time.After(time.Second):
+		t.Fatal("SSE tail did not reach EOF")
+	}
+	if !bytes.Equal(consumed, terminal) || !snapshot.Complete || len(snapshot.HTTP) != 1 ||
+		!snapshot.HTTP[0].ResponseComplete || !bytes.Equal(snapshot.HTTP[0].Response, providerResponse) {
+		t.Fatal("terminal SSE event did not preserve the provider's complete response")
+	}
+}
+
+func TestUpstreamCaptureDoesNotDrainEarlyOrCanceledSSE(t *testing.T) {
+	for _, canceled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "no-terminal", true: "canceled"}[canceled], func(t *testing.T) {
+			base, cancel := context.WithCancel(WithUpstreamCaptureEnabled(context.Background()))
+			defer cancel()
+			ctx := WithUpstreamCaptureAttempt(base)
+			capture := UpstreamCaptureFromContext(ctx)
+			capture.Arm()
+			body := []byte("event: response.completed\ndata: {\"type\":\"response.completed\"}\n\ndata: [DONE]\n\n")
+			client := &http.Client{Transport: CaptureHTTPTransport(ctx, sseCaptureTransport{body: body})}
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://provider.invalid/model", strings.NewReader("request"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			readSize := len("event: response.completed\ndata: {\"type\":\"response.completed\"}\n")
+			if !canceled {
+				readSize = len("event: response.completed\n")
+			}
+			consumed := make([]byte, readSize)
+			if _, err := io.ReadFull(response.Body, consumed); err != nil {
+				t.Fatal(err)
+			}
+			if canceled {
+				cancel()
+			}
+			if err := response.Body.Close(); err != nil {
+				t.Fatal(err)
+			}
+			var snapshot UpstreamSnapshot
+			capture.OnComplete(func(got UpstreamSnapshot) { snapshot = got })
+			if snapshot.Complete || snapshot.HTTP[0].ResponseComplete || !bytes.Equal(snapshot.HTTP[0].Response, consumed) {
+				t.Fatal("early or canceled SSE response was drained")
+			}
+		})
+	}
+}
+
+func TestUpstreamCaptureDrainsLateSSETailFromHTTPProvider(t *testing.T) {
+	terminal := []byte("data: {\"type\":\"response.completed\"}\n\n")
+	tail := []byte("data: [DONE]\n\n")
+	releaseTail := make(chan struct{})
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write(terminal)
+		w.(http.Flusher).Flush()
+		<-releaseTail
+		_, _ = w.Write(tail)
+	}))
+	defer func() {
+		select {
+		case <-releaseTail:
+		default:
+			close(releaseTail)
+		}
+		provider.Close()
+	}()
+	base, cancel := context.WithCancel(WithUpstreamCaptureEnabled(context.Background()))
+	defer cancel()
+	ctx := WithUpstreamCaptureAttempt(base)
+	capture := UpstreamCaptureFromContext(ctx)
+	capture.Arm()
+	client := &http.Client{Transport: CaptureHTTPTransport(ctx, http.DefaultTransport)}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.URL, strings.NewReader("request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumed := make([]byte, len(terminal))
+	if _, err := io.ReadFull(response.Body, consumed); err != nil {
+		t.Fatal(err)
+	}
+	snapshots := make(chan UpstreamSnapshot, 1)
+	capture.OnComplete(func(got UpstreamSnapshot) { snapshots <- got })
+	if err := response.Body.Close(); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseTail)
+	select {
+	case snapshot := <-snapshots:
+		if !snapshot.Complete || !snapshot.HTTP[0].ResponseComplete ||
+			!bytes.Equal(snapshot.HTTP[0].Response, append(bytes.Clone(terminal), tail...)) {
+			t.Fatal("late provider tail was not captured through EOF")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late SSE tail did not reach EOF")
+	}
+}
+
+func TestUpstreamCaptureTerminalSSEDoesNotBlockClose(t *testing.T) {
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"type\":\"response.completed\"}\n\n"))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer provider.Close()
+	base, cancel := context.WithCancel(WithUpstreamCaptureEnabled(context.Background()))
+	defer cancel()
+	ctx := WithUpstreamCaptureAttempt(base)
+	capture := UpstreamCaptureFromContext(ctx)
+	capture.Arm()
+	client := &http.Client{Transport: CaptureHTTPTransport(ctx, http.DefaultTransport)}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.URL, strings.NewReader("request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consumed := make([]byte, len("data: {\"type\":\"response.completed\"}\n\n"))
+	if _, err := io.ReadFull(response.Body, consumed); err != nil {
+		t.Fatal(err)
+	}
+	snapshots := make(chan UpstreamSnapshot, 1)
+	capture.OnComplete(func(got UpstreamSnapshot) { snapshots <- got })
+	closed := make(chan error, 1)
+	go func() { closed <- response.Body.Close() }()
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("closing a terminal SSE response blocked on the provider")
+	}
+	cancel()
+	select {
+	case snapshot := <-snapshots:
+		if snapshot.Complete || snapshot.HTTP[0].ResponseComplete || !bytes.Equal(snapshot.HTTP[0].Response, consumed) {
+			t.Fatal("canceled SSE tail was marked complete or lost bytes")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSE tail did not terminate after cancellation")
+	}
+}
+
+type sseCaptureTransport struct{ body []byte }
+
+func (t sseCaptureTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	_, _ = io.Copy(io.Discard, req.Body)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(bytes.NewReader(t.body)),
+		Header:     http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
+	}, nil
 }
 
 func TestUpstreamCaptureCancellationKeepsPartialProviderResponse(t *testing.T) {
