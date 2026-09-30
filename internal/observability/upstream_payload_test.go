@@ -14,7 +14,7 @@ func TestUpstreamPayloadAttributesPreserveCallPairsAndBinaryBytes(t *testing.T) 
 		{Method: "POST", Status: 503, Request: []byte(`{"input":"first"}`), Response: []byte{0, 255, 1}, RequestComplete: true, ResponseComplete: true},
 		{Method: "POST", Status: 200, Request: []byte{255, 2}, Response: []byte(`{"answer":"second"}`), RequestComplete: true, ResponseComplete: false},
 	}}
-	attrs := upstreamPayloadAttributes(snapshot)
+	attrs := upstreamPayloadAttributes(snapshot, 0)
 	values := make(map[string]attribute.Value)
 	for _, attr := range attrs {
 		values[string(attr.Key)] = attr.Value
@@ -66,7 +66,7 @@ func TestUpstreamPayloadAttributesExposePartialResponseWithoutChangingText(t *te
 		Method: "POST", Status: 200,
 		Request: []byte(`{"messages":["full"]}`), Response: []byte("event: reasoning\r\ndata: partial"),
 		RequestComplete: true, ResponseComplete: false,
-	}}})
+	}}}, 0)
 	values := make(map[string]attribute.Value)
 	for _, attr := range attrs {
 		values[string(attr.Key)] = attr.Value

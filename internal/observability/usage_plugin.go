@@ -108,13 +108,16 @@ func (usagePlugin) HandleUsage(ctx context.Context, record sdkusage.Record) {
 		endOpts = append(endOpts, trace.WithTimestamp(start.Add(record.Latency)))
 	}
 	if capture := sdkusage.UpstreamCaptureFromContext(ctx); capture != nil {
+		// The capture byte budget also bounds the semantic Langfuse output
+		// extracted from the snapshot, reusing the existing truncation policy.
+		_, _, maxBytes := activeCaptureSettings()
 		if snapshot, ok := sdkusage.WebSocketTurnSnapshotFromContext(ctx); ok {
-			span.SetAttributes(upstreamPayloadAttributes(snapshot)...)
+			span.SetAttributes(upstreamPayloadAttributes(snapshot, maxBytes)...)
 			span.End(endOpts...)
 			return
 		}
 		capture.OnComplete(func(snapshot sdkusage.UpstreamSnapshot) {
-			span.SetAttributes(upstreamPayloadAttributes(snapshot)...)
+			span.SetAttributes(upstreamPayloadAttributes(snapshot, maxBytes)...)
 			span.End(endOpts...)
 		})
 		return
