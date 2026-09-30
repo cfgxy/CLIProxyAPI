@@ -9,7 +9,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 )
 
-func upstreamPayloadAttributes(snapshot sdkusage.UpstreamSnapshot) []attribute.KeyValue {
+func upstreamPayloadAttributes(snapshot sdkusage.UpstreamSnapshot, maxBytes int) []attribute.KeyValue {
 	if len(snapshot.HTTP) == 0 && len(snapshot.WebSocket) == 0 {
 		return nil
 	}
@@ -18,7 +18,7 @@ func upstreamPayloadAttributes(snapshot sdkusage.UpstreamSnapshot) []attribute.K
 		call := snapshot.HTTP[0]
 		attrs = append(attrs,
 			attribute.String("langfuse.observation.input", payloadText(call.Request)),
-			attribute.String("langfuse.observation.output", payloadText(call.Response)),
+			attribute.String("langfuse.observation.output", semanticOutputText(call.Response, maxBytes)),
 			attribute.String("cpa.upstream.http.method", call.Method),
 			attribute.Int("cpa.upstream.http.status", call.Status),
 			attribute.Bool("cpa.upstream.http.request_complete", call.RequestComplete),
@@ -35,7 +35,7 @@ func upstreamPayloadAttributes(snapshot sdkusage.UpstreamSnapshot) []attribute.K
 				"method": call.Method, "body": payloadValue(call.Request), "complete": call.RequestComplete,
 			})
 			responses = append(responses, map[string]any{
-				"status": call.Status, "body": payloadValue(call.Response), "complete": call.ResponseComplete,
+				"status": call.Status, "body": semanticOutputValue(call.Response, maxBytes), "complete": call.ResponseComplete,
 			})
 		}
 		attrs = append(attrs,
@@ -81,6 +81,40 @@ func payloadValue(raw []byte) any {
 		return string(raw)
 	}
 	return map[string]string{"encoding": "base64", "data": base64.StdEncoding.EncodeToString(raw)}
+}
+
+// semanticOutputText renders a captured response body for the single-call
+// Langfuse output attribute: the semantic LLM output (assistant text or tool
+// calls) when it can be extracted, otherwise the legacy raw/base64 rendering.
+// The result is bounded by the same capture byte budget the root-span capture
+// uses; maxBytes <= 0 leaves it untruncated.
+func semanticOutputText(raw []byte, maxBytes int) string {
+	if value, ok := semanticLLMOutput(raw); ok {
+		return truncate(semanticText(value), maxBytes)
+	}
+	return payloadText(raw)
+}
+
+// semanticOutputValue is semanticOutputText's counterpart for the multi-call
+// array form, where each body stays a JSON value instead of a flat string.
+func semanticOutputValue(raw []byte, maxBytes int) any {
+	if value, ok := semanticLLMOutput(raw); ok {
+		if text, isText := value.(string); isText {
+			return truncate(text, maxBytes)
+		}
+		if maxBytes > 0 {
+			return json.RawMessage(truncate(jsonText(value), maxBytes))
+		}
+		return value
+	}
+	return payloadValue(raw)
+}
+
+func semanticText(value any) string {
+	if text, isText := value.(string); isText {
+		return text
+	}
+	return jsonText(value)
 }
 
 func jsonText(value any) string {
