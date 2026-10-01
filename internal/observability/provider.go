@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	appconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	sdkusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	appconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
@@ -179,4 +179,22 @@ func activeCaptureSettings() (input, output bool, maxBytes int) {
 		return false, false, 0
 	}
 	return current.settings.captureInput, current.settings.captureOutput, current.settings.captureMaxBytes
+}
+
+func activeUpstreamCaptureEnabled() bool {
+	providerMu.RLock()
+	defer providerMu.RUnlock()
+	return current != nil && current.settings.captureUpstream
+}
+
+// activePlaintextUserID reports whether the resolved caller identity may be
+// written to spans verbatim. It defaults to false, including when tracing is
+// disabled, so the irreversible digest is always the fallback behaviour.
+func activePlaintextUserID() bool {
+	providerMu.RLock()
+	defer providerMu.RUnlock()
+	if current == nil {
+		return false
+	}
+	return current.settings.plaintextUserID
 }

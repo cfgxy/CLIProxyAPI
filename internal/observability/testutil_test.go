@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 
 	"github.com/gin-gonic/gin"
-	internallogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	internallogging "github.com/router-for-me/CLIProxyAPI/v8/internal/logging"
 )
 
 // newGinTestRouter builds a gin engine that mirrors the real server's

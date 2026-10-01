@@ -15,11 +15,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v8/sdk/translator"
 )
 
 func antigravityAuthWithProxy(proxyURL string) *cliproxyauth.Auth {
@@ -111,6 +112,47 @@ func TestNewAntigravityHTTPClientSharesTransport(t *testing.T) {
 				t.Fatalf("IdleConnTimeout = %v exceeds GFE cutoff %v", transport.IdleConnTimeout, antigravityMaxAllowedIdleConnTimeout)
 			}
 		})
+	}
+}
+
+func TestNewAntigravityHTTPClientCapturePreservesHTTP11PoolAndProviderBytes(t *testing.T) {
+	ctx := sdkusage.WithUpstreamCaptureAttempt(sdkusage.WithUpstreamCaptureEnabled(context.Background()))
+	capture := sdkusage.UpstreamCaptureFromContext(ctx)
+	capture.Arm()
+	auth := antigravityAuthWithIDAndProxy("capture-http11", "")
+	client := newAntigravityHTTPClient(ctx, &config.Config{}, auth, 0)
+	second := newAntigravityHTTPClient(ctx, &config.Config{}, auth, 0)
+	firstBase, ok := sdkusage.UnwrapCapturedHTTPTransport(client.Transport).(*http.Transport)
+	if !ok {
+		t.Fatalf("expected HTTP/1.1 transport inside capture, got %T", client.Transport)
+	}
+	if firstBase != sdkusage.UnwrapCapturedHTTPTransport(second.Transport) || firstBase.ForceAttemptHTTP2 ||
+		firstBase.TLSClientConfig == nil || len(firstBase.TLSClientConfig.NextProtos) != 0 {
+		t.Fatal("capture changed credential pool reuse or Antigravity HTTP/1.1 fingerprint")
+	}
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor != 1 {
+			t.Errorf("unexpected HTTP version: %s", r.Proto)
+		}
+		_, _ = w.Write([]byte("provider-result"))
+	}))
+	defer provider.Close()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, provider.URL, strings.NewReader("provider-request"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	var got sdkusage.UpstreamSnapshot
+	capture.OnComplete(func(snapshot sdkusage.UpstreamSnapshot) { got = snapshot })
+	if !got.Complete || len(got.HTTP) != 1 || string(got.HTTP[0].Request) != "provider-request" || string(got.HTTP[0].Response) != "provider-result" {
+		t.Fatalf("Antigravity body was not captured: complete=%t calls=%d", got.Complete, len(got.HTTP))
 	}
 }
 

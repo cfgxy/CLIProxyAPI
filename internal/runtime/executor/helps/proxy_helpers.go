@@ -7,10 +7,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
+	"github.com/router-for-me/CLIProxyAPI/v8/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -41,7 +42,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if proxyURL != "" {
 		transport := buildProxyTransport(proxyURL)
 		if transport != nil {
-			httpClient.Transport = transport
+			httpClient.Transport = sdkusage.CaptureHTTPTransport(ctx, transport)
 			return httpClient
 		}
 		// If proxy setup failed, log and fall through to context RoundTripper
@@ -52,6 +53,7 @@ func NewProxyAwareHTTPClient(ctx context.Context, cfg *config.Config, auth *clip
 	if rt, ok := ctx.Value("cliproxy.roundtripper").(http.RoundTripper); ok && rt != nil {
 		httpClient.Transport = rt
 	}
+	httpClient.Transport = sdkusage.CaptureHTTPTransport(ctx, httpClient.Transport)
 
 	return httpClient
 }
@@ -74,13 +76,13 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 				})
 				if err == nil && cloned != nil {
 					return &http.Client{
-						Transport: cloned,
+						Transport: sdkusage.CaptureHTTPTransport(ctx, cloned),
 						Timeout:   timeout,
 					}
 				}
 			}
 			return &http.Client{
-				Transport: devinNoGzipRoundTripper{base: rt},
+				Transport: sdkusage.CaptureHTTPTransport(ctx, devinNoGzipRoundTripper{base: rt}),
 				Timeout:   timeout,
 			}
 		}
@@ -108,7 +110,7 @@ func NewDevinHTTPClient(ctx context.Context, cfg *config.Config, auth *cliproxya
 	}
 
 	return &http.Client{
-		Transport: tr,
+		Transport: sdkusage.CaptureHTTPTransport(ctx, tr),
 		Timeout:   timeout,
 	}
 }
