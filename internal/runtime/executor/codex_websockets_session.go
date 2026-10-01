@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -86,10 +86,11 @@ type codexWebsocketSession struct {
 }
 
 type codexWebsocketRead struct {
-	conn    *websocket.Conn
-	msgType int
-	payload []byte
-	err     error
+	conn       *websocket.Conn
+	msgType    int
+	payload    []byte
+	rawPayload []byte
+	err        error
 }
 
 func (s *codexWebsocketSession) setActive(conn *websocket.Conn, ch chan codexWebsocketRead) {
@@ -696,7 +697,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 				invalidated := false
 				ch, done := sess.activeForConn(conn)
 				if ch != nil {
-					invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, err: errBinary}, invalidate)
+					invalidated = sendTerminalWebsocketRead(ch, done, codexWebsocketRead{conn: conn, msgType: msgType, rawPayload: payload, err: errBinary}, invalidate)
 					if sess.clearActive(conn, ch) {
 						close(ch)
 					}
@@ -709,6 +710,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			continue
 		}
 
+		rawPayload := payload
 		payload = bytes.TrimSpace(payload)
 		if len(payload) > 0 {
 			eventType := gjson.GetBytes(payload, "type").String()
@@ -722,7 +724,7 @@ func (e *CodexWebsocketsExecutor) readUpstreamLoop(sess *codexWebsocketSession, 
 			continue
 		}
 		select {
-		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, payload: payload}:
+		case ch <- codexWebsocketRead{conn: conn, msgType: msgType, payload: payload, rawPayload: rawPayload}:
 		case <-done:
 		}
 	}

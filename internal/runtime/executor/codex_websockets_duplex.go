@@ -11,9 +11,10 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v8/internal/runtime/executor/helps"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+	sdkusage "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -200,7 +201,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				fail(cliproxyexecutor.NewUpstreamWebsocketReplayRequiredError())
 				return false
 			}
-			payload = buildCodexWebsocketRequestBody(prepared.upstreamBody)
+			payload = buildCodexWebsocketRequestBody(prepared.clientBody)
 			metadataMu.Lock()
 			if len(pending) >= 16 {
 				metadataMu.Unlock()
@@ -219,7 +220,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 				URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
 			})
-			if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+			if errWrite := writeCodexWebsocketMessage(streamCtx, sess, conn, payload); errWrite != nil {
 				fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 				return false
 			}
@@ -304,7 +305,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					helps.RecordAPIWebsocketRequest(streamCtx, e.cfg, helps.UpstreamRequestLog{
 						URL: initial.wsURL, Method: "WEBSOCKET", Body: payload, Provider: e.Identifier(), AuthID: auth.ID,
 					})
-					if errWrite := writeCodexWebsocketMessage(sess, conn, payload); errWrite != nil {
+					if errWrite := writeCodexWebsocketMessage(streamCtx, sess, conn, payload); errWrite != nil {
 						fail(mapCodexWebsocketWriteError(sess, conn, errWrite))
 						return
 					}
@@ -336,6 +337,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 	}()
 	go func() {
 		defer close(out)
+		defer sdkusage.UpstreamCaptureFromContext(streamCtx).FinishWebSocket(false)
 		defer func() {
 			cancel()
 			// Close releases a writer blocked in the network, then join it before
@@ -368,8 +370,10 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				}
 				if ctx.Err() == nil {
 					connectionErr := &codexDuplexConnectionError{cause: errRead}
-					reporter.PublishFailure(ctx, connectionErr)
+					reporter.PublishFailure(sdkusage.CaptureWebSocketTurn(ctx, false), connectionErr)
 					send(cliproxyexecutor.StreamChunk{Err: connectionErr})
+				} else {
+					reporter.PublishFailure(sdkusage.CaptureWebSocketTurn(ctx, false), ctx.Err())
 				}
 				return
 			}
@@ -378,6 +382,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			payload = bytes.TrimSpace(payload)
 			eventType := gjson.GetBytes(payload, "type").String()
+			eventCtx := ctx
 			establishing := firstResponse && eventType == "response.created"
 			if eventType == "response.created" {
 				metadataMu.Lock()
@@ -393,7 +398,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					if settings == nil {
 						metadataMu.Unlock()
 						connectionErr := &codexDuplexConnectionError{cause: fmt.Errorf("automatic successor has no retained parent settings")}
-						reporter.PublishFailure(ctx, connectionErr)
+						reporter.PublishFailure(sdkusage.CaptureWebSocketTurn(ctx, false), connectionErr)
 						send(cliproxyexecutor.StreamChunk{Err: connectionErr})
 						return
 					}
@@ -413,7 +418,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				// Retain response settings, not request history or authorization headers.
 				// In-flight steering pins its parent's settings independently of this window.
 				snapshot := *current
-				snapshot.originalPayload, snapshot.upstreamBody, snapshot.wsHeaders = nil, nil, nil
+				snapshot.originalPayload, snapshot.wsHeaders = nil, nil
 				snapshot.clientBody = []byte("{}")
 				if reasoning := gjson.GetBytes(current.clientBody, "reasoning"); reasoning.Exists() {
 					snapshot.clientBody, _ = sjson.SetRawBytes(snapshot.clientBody, "reasoning", []byte(reasoning.Raw))
@@ -495,7 +500,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					// Account health is independent of which queued request failed.
 					// The conductor records the original classification without replaying
 					// this already-started stream on another credential.
-					reporter.PublishFailure(ctx, credentialErr)
+					reporter.PublishFailure(sdkusage.CaptureWebSocketTurn(ctx, true), credentialErr)
 					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
 						send(cliproxyexecutor.StreamChunk{Err: credentialErr})
 					}
@@ -511,7 +516,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				metadataMu.Lock()
 				// A failure for the running response must not consume a queued create.
 				// A rejection before response.created instead owns the oldest pending
-				// create, including its identity mapping and reasoning replay scope.
+				// create, including its reasoning replay scope.
 				currentFailure := failedID != "" && failedID == responseID
 				ambiguous := failedID == "" && ((len(pending) > 0 && responseActive) || len(unacknowledgedSteers) > 0)
 				if len(pending) > 0 && !currentFailure && !ambiguous {
@@ -523,20 +528,20 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					automaticActive = false
 				}
 				metadataMu.Unlock()
+				eventCtx = sdkusage.CaptureWebSocketTurn(ctx, !ambiguous)
 				wakeWriter()
 				if ambiguous {
 					// Without a response ID, assigning this failure could corrupt
 					// either request. Preserve the event and fail the socket without
 					// guessing a scope, replaying input, or cooling the credential.
 					connectionErr := &codexDuplexConnectionError{cause: fmt.Errorf("cannot associate websocket failure with a response or pending create")}
-					reporter.PublishFailure(ctx, connectionErr)
+					reporter.PublishFailure(eventCtx, connectionErr)
 					if send(cliproxyexecutor.StreamChunk{Payload: payload}) {
 						send(cliproxyexecutor.StreamChunk{Err: connectionErr})
 					}
 					return
 				}
 			}
-			payload = applyCodexIdentityConfuseResponsePayload(payload, eventPrepared.identityState)
 			restoreMultiAgent := !eventPrepared.multiAgentV2Conflict && (eventPrepared.optimizeMultiAgentV2 || sess.isMultiAgentV2Optimized(conn))
 			payload = helps.RestoreCodexMultiAgentV2Response(payload, restoreMultiAgent)
 			// Parse and invalidate replay for every rejected request, using the
@@ -552,13 +557,16 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 			}
 			if replayErr != nil {
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "replay_clear_error", replayErr)
-				eventReporter.PublishFailure(ctx, replayErr)
+				eventReporter.PublishFailure(eventCtx, replayErr)
 				send(cliproxyexecutor.StreamChunk{Err: replayErr})
 				return
 			}
 			if terminalErr != nil {
 				helps.RecordAPIWebsocketError(ctx, e.cfg, "upstream_error", terminalErr)
-				eventReporter.PublishFailure(ctx, terminalErr)
+				if eventCtx == ctx {
+					eventCtx = sdkusage.CaptureWebSocketTurn(ctx, false)
+				}
+				eventReporter.PublishFailure(eventCtx, terminalErr)
 				if firstResponse {
 					send(cliproxyexecutor.StreamChunk{Err: terminalErr})
 					return
@@ -568,6 +576,7 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 				collectCodexOutputItemDone(payload, outputItems, &outputFallback)
 			}
 			if eventType == "response.completed" || eventType == "response.done" || eventType == "response.incomplete" {
+				eventCtx = sdkusage.CaptureWebSocketTurn(ctx, true)
 				responseActive = false
 				metadataMu.Lock()
 				automaticActive = false
@@ -581,12 +590,11 @@ func (e *CodexWebsocketsExecutor) streamCodexDuplex(
 					cacheCodexReasoningReplayFromCompleted(current.replayScope, payload)
 				}
 				if detail, ok := helps.ParseCodexUsage(payload); ok {
-					reporter.Publish(ctx, detail)
+					reporter.Publish(eventCtx, detail)
 				} else {
-					reporter.EnsurePublished(ctx)
+					reporter.EnsurePublished(eventCtx)
 				}
 			}
-			payload = applyCodexIdentityExposeResponsePayload(payload, eventPrepared.identityState)
 			if !send(cliproxyexecutor.StreamChunk{Payload: helps.EnsureResponsesUsageDetails(payload)}) {
 				return
 			}

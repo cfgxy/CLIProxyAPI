@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	appconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	appconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 )
 
 // settings is the fully resolved, runtime-ready observability configuration,
@@ -36,6 +36,9 @@ type settings struct {
 	captureInput    bool
 	captureOutput   bool
 	captureMaxBytes int
+	captureUpstream bool
+
+	plaintextUserID bool
 }
 
 // resolveSettings validates and normalizes an ObservabilityConfig, resolving
@@ -50,6 +53,8 @@ func resolveSettings(cfg appconfig.ObservabilityConfig) (settings, error) {
 		captureInput:    cfg.Capture.Input,
 		captureOutput:   cfg.Capture.Output,
 		captureMaxBytes: cfg.Capture.MaxBytes,
+		captureUpstream: cfg.Capture.Upstream,
+		plaintextUserID: cfg.Identity.PlaintextUserID,
 	}
 	if !s.enabled {
 		return s, nil

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	appconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	appconfig "github.com/router-for-me/CLIProxyAPI/v8/internal/config"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
