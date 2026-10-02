@@ -103,7 +103,15 @@ func semanticOutputValue(raw []byte, maxBytes int) any {
 			return truncate(text, maxBytes)
 		}
 		if maxBytes > 0 {
-			return json.RawMessage(truncate(jsonText(value), maxBytes))
+			encoded := jsonText(value)
+			if len(encoded) > maxBytes {
+				// Byte-truncating serialized JSON yields invalid JSON, which
+				// fails the whole outer Marshal and empties the output
+				// attribute; degrade to the bounded plain-text form the
+				// single-call path uses instead.
+				return truncate(encoded, maxBytes)
+			}
+			return json.RawMessage(encoded)
 		}
 		return value
 	}
