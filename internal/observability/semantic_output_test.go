@@ -292,3 +292,38 @@ func TestUpstreamPayloadAttributesSemanticMultiCallBodies(t *testing.T) {
 		t.Fatalf("multi-call bodies were not semanticized: %s %s", responses[0].Body, responses[1].Body)
 	}
 }
+
+func TestUpstreamPayloadAttributesSemanticMultiCallTruncationDegradesToText(t *testing.T) {
+	// An over-budget structured assistant output used to be byte-truncated as
+	// raw JSON, poisoning the outer Marshal and emptying the whole output
+	// attribute; it must degrade to bounded readable text instead.
+	big := strings.Repeat("a", 200)
+	structured := gzipBytes(t, []byte(`{"choices":[{"message":{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"lookup","arguments":"{\"query\":\"`+big+`\"}"}}]}}]}`))
+	snapshot := sdkusage.UpstreamSnapshot{Complete: true, HTTP: []sdkusage.CapturedHTTP{
+		{Method: "POST", Status: 200, Request: []byte(`{}`), Response: structured, RequestComplete: true, ResponseComplete: true},
+		{Method: "POST", Status: 200, Request: []byte(`{}`), Response: []byte(`{"choices":[{"message":{"role":"assistant","content":"second"}}]}`), RequestComplete: true, ResponseComplete: true},
+	}}
+	attrs := upstreamPayloadAttributes(snapshot, 96)
+	values := attributeValues(attrs)
+	output := values["langfuse.observation.output"].AsString()
+	if output == "" {
+		t.Fatal("truncated multi-call structured output emptied the whole output attribute")
+	}
+	var responses []struct {
+		Status int             `json:"status"`
+		Body   json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(output), &responses); err != nil {
+		t.Fatalf("output attribute is not valid JSON: %v", err)
+	}
+	if len(responses) != 2 || responses[0].Status != 200 || responses[1].Status != 200 {
+		t.Fatalf("multi-call pairing regressed: %#v", responses)
+	}
+	degraded := string(responses[0].Body)
+	if !strings.Contains(degraded, "lookup") || !strings.Contains(degraded, "...[truncated]") {
+		t.Fatalf("over-budget body lost semantic content: %s", degraded)
+	}
+	if string(responses[1].Body) != `"second"` {
+		t.Fatalf("within-budget call regressed: %s", responses[1].Body)
+	}
+}
